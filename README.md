@@ -94,10 +94,11 @@ npm run db:seed        # upsert the ADMIN_EMAIL/ADMIN_PASSWORD_HASH user into th
    Preview). Never commit real values to `.env.example`.
 3. Provision a Postgres database and set `DATABASE_URL`, then run `npm run db:push` (or set
    up `db:migrate` in CI) against it once.
-4. `vercel.json` already declares the four cron jobs (`sync-inbox`, `detect-replies`,
-   `find-due-followups`, `send-campaigns`). Vercel Hobby plans currently limit cron to lower
-   frequencies than what's configured here — adjust the schedules in `vercel.json` to match
-   your plan if deploys reject the config.
+4. `vercel.json` declares the four cron jobs (`sync-inbox`, `detect-replies`,
+   `find-due-followups`, `send-campaigns`), staggered once daily (06:00–06:45 UTC) because
+   Vercel Hobby plans reject any cron schedule that fires more than once a day. On a Pro plan
+   you can tighten these back down (e.g. every 15 minutes) for much faster reply detection and
+   follow-up delivery.
 5. Deploy. `npm run build` runs `prisma generate` automatically via the `build`/`postinstall`
    scripts, so no extra Vercel build command is needed.
 
