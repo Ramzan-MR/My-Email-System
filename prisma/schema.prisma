@@ -1,0 +1,427 @@
+// My-Email-System database schema
+// See CLAUDE.md "Database Entities" for the spec this implements.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Sending accounts (connected inboxes)
+// ---------------------------------------------------------------------------
+
+enum SendingAccountProvider {
+  GOOGLE
+}
+
+model SendingAccount {
+  id               String                  @id @default(cuid())
+  email            String                  @unique
+  provider         SendingAccountProvider  @default(GOOGLE)
+  displayName      String?
+  // OAuth tokens are encrypted at rest, see lib/crypto.ts. Never expose these
+  // fields to the client.
+  accessTokenEnc   String?
+  refreshTokenEnc  String?
+  tokenExpiresAt   DateTime?
+  scope            String?
+  dailyLimit       Int                     @default(25)
+  isActive         Boolean                 @default(true)
+  lastSyncAt       DateTime?
+  historyId        String?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  campaigns        CampaignSendingAccount[]
+  campaignLeads    CampaignLead[]
+  emailThreads     EmailThread[]
+  emailMessages    EmailMessage[]
+  replies          Reply[]
+
+  @@index([isActive])
+}
+
+// ---------------------------------------------------------------------------
+// Leads
+// ---------------------------------------------------------------------------
+
+model Lead {
+  id                     String   @id @default(cuid())
+  firstName              String?
+  lastName               String?
+  email                  String   @unique
+  company                String?
+  website                String?
+  jobTitle               String?
+  linkedinUrl            String?
+  phone                  String?
+  customPersonalization  String?
+  notes                  String?
+  source                 String?  @default("manual")
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  campaignLeads   CampaignLead[]
+  emailThreads    EmailThread[]
+  emailMessages   EmailMessage[]
+  replies         Reply[]
+  followUps       FollowUp[]
+  suppressions    SuppressionEntry[]
+  auditLogs       AuditLog[]
+
+  @@index([email])
+}
+
+// ---------------------------------------------------------------------------
+// Campaigns
+// ---------------------------------------------------------------------------
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+model Campaign {
+  id                          String         @id @default(cuid())
+  name                        String
+  status                      CampaignStatus @default(DRAFT)
+  subjectTemplate             String
+  bodyTemplate                String
+  // Array of { order: number, delayDays: number, instructions: string }
+  followUpTemplates           String         @default("[]")
+  aiPersonalizationEnabled    Boolean        @default(true)
+  autoFollowUpEnabled         Boolean        @default(false)
+  dailyLimit                  Int            @default(25)
+  delayMinBetweenSendsSec     Int            @default(60)
+  delayMaxBetweenSendsSec     Int            @default(300)
+  createdAt                   DateTime       @default(now())
+  updatedAt                   DateTime       @updatedAt
+
+  sendingAccounts  CampaignSendingAccount[]
+  campaignLeads    CampaignLead[]
+  emailMessages    EmailMessage[]
+  followUps        FollowUp[]
+  auditLogs        AuditLog[]
+
+  @@index([status])
+}
+
+model CampaignSendingAccount {
+  id               String         @id @default(cuid())
+  campaignId       String
+  sendingAccountId String
+  campaign         Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  sendingAccount   SendingAccount @relation(fields: [sendingAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, sendingAccountId])
+}
+
+// ---------------------------------------------------------------------------
+// Campaign <-> Lead join / pipeline state
+// ---------------------------------------------------------------------------
+
+enum LeadStatus {
+  PENDING
+  READY
+  QUEUED
+  SENT
+  FOLLOWUP_DUE
+  REPLIED
+  AUTO_REPLY
+  BOUNCED
+  UNSUBSCRIBED
+  PAUSED
+  INTERESTED
+  NOT_INTERESTED
+  NEEDS_HUMAN_REVIEW
+  COMPLETED
+}
+
+model CampaignLead {
+  id                 String     @id @default(cuid())
+  campaignId         String
+  leadId             String
+  status             LeadStatus @default(PENDING)
+  approved           Boolean    @default(false)
+  senderAccountId    String?
+  initialEmailSent   Boolean    @default(false)
+  initialEmailDate   DateTime?
+  followUpNumber     Int        @default(0)
+  nextFollowUpDate   DateTime?
+  lastContactedAt    DateTime?
+  pausedAt           DateTime?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  campaign         Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead             Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  senderAccount    SendingAccount? @relation(fields: [senderAccountId], references: [id])
+  emailThread      EmailThread?
+  emailMessages    EmailMessage[]
+  followUps        FollowUp[]
+  replies          Reply[]
+
+  @@unique([campaignId, leadId])
+  @@index([status])
+  @@index([nextFollowUpDate])
+}
+
+// ---------------------------------------------------------------------------
+// Email threads / messages
+// ---------------------------------------------------------------------------
+
+model EmailThread {
+  id               String   @id @default(cuid())
+  campaignLeadId   String   @unique
+  leadId           String
+  sendingAccountId String
+  gmailThreadId    String?  @unique
+  subject          String?
+  lastMessageAt    DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  campaignLead   CampaignLead   @relation(fields: [campaignLeadId], references: [id], onDelete: Cascade)
+  lead           Lead           @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  sendingAccount SendingAccount @relation(fields: [sendingAccountId], references: [id])
+  messages       EmailMessage[]
+  replies        Reply[]
+
+  @@index([gmailThreadId])
+}
+
+enum EmailMessageType {
+  INITIAL
+  FOLLOW_UP
+}
+
+enum EmailMessageStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+model EmailMessage {
+  id               String              @id @default(cuid())
+  campaignId       String
+  campaignLeadId   String
+  leadId           String
+  sendingAccountId String
+  emailThreadId    String?
+  type             EmailMessageType
+  followUpNumber   Int?
+  subject          String
+  body             String
+  gmailMessageId   String?             @unique
+  gmailThreadId    String?
+  status           EmailMessageStatus  @default(QUEUED)
+  // Deterministic key (e.g. campaignLeadId + type + followUpNumber) so retried
+  // cron/job runs never send the same email twice.
+  idempotencyKey   String              @unique
+  errorMessage     String?
+  sentAt           DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  campaign       Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaignLead   CampaignLead   @relation(fields: [campaignLeadId], references: [id], onDelete: Cascade)
+  lead           Lead           @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  sendingAccount SendingAccount @relation(fields: [sendingAccountId], references: [id])
+  emailThread    EmailThread?   @relation(fields: [emailThreadId], references: [id])
+
+  @@index([status])
+  @@index([campaignLeadId])
+}
+
+// ---------------------------------------------------------------------------
+// Replies
+// ---------------------------------------------------------------------------
+
+enum ReplyClassification {
+  INTERESTED
+  POSITIVE_REPLY
+  MEETING_REQUEST
+  NEEDS_MORE_INFO
+  NEUTRAL
+  NOT_INTERESTED
+  UNSUBSCRIBE
+  AUTO_REPLY
+  BOUNCE
+  WRONG_PERSON
+  REFERRAL
+  OTHER
+  NEEDS_HUMAN_REVIEW
+}
+
+model Reply {
+  id                  String                @id @default(cuid())
+  campaignLeadId      String?
+  leadId              String
+  emailThreadId       String?
+  sendingAccountId    String
+  gmailMessageId      String                @unique
+  fromEmail           String
+  snippet             String?
+  bodyText            String?
+  bodyHtml            String?
+  receivedAt          DateTime
+  classification      ReplyClassification?
+  aiSummary           String?
+  isAutoReply         Boolean               @default(false)
+  autoReplyReturnDate DateTime?
+  processedAt         DateTime?
+  createdAt           DateTime              @default(now())
+
+  campaignLead   CampaignLead?   @relation(fields: [campaignLeadId], references: [id], onDelete: Cascade)
+  lead           Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  emailThread    EmailThread?    @relation(fields: [emailThreadId], references: [id])
+  sendingAccount SendingAccount  @relation(fields: [sendingAccountId], references: [id])
+
+  @@index([leadId])
+  @@index([classification])
+}
+
+// ---------------------------------------------------------------------------
+// Follow-ups (review queue)
+// ---------------------------------------------------------------------------
+
+enum FollowUpStatus {
+  PENDING_REVIEW
+  APPROVED
+  SENT
+  SKIPPED
+  SNOOZED
+  CANCELLED
+}
+
+model FollowUp {
+  id                 String         @id @default(cuid())
+  campaignId         String
+  campaignLeadId     String
+  leadId             String
+  followUpNumber     Int
+  dueDate            DateTime
+  draftSubject       String?
+  draftBody          String?
+  status             FollowUpStatus @default(PENDING_REVIEW)
+  snoozedUntil       DateTime?
+  approvedAt         DateTime?
+  sentEmailMessageId String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  campaign     Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaignLead CampaignLead @relation(fields: [campaignLeadId], references: [id], onDelete: Cascade)
+  lead         Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([dueDate])
+}
+
+// ---------------------------------------------------------------------------
+// Suppression list
+// ---------------------------------------------------------------------------
+
+enum SuppressionReason {
+  UNSUBSCRIBED
+  BOUNCED
+  MANUALLY_BLOCKED
+}
+
+model SuppressionEntry {
+  id        String            @id @default(cuid())
+  email     String            @unique
+  leadId    String?
+  reason    SuppressionReason
+  note      String?
+  createdAt DateTime          @default(now())
+
+  lead Lead? @relation(fields: [leadId], references: [id])
+
+  @@index([email])
+}
+
+// ---------------------------------------------------------------------------
+// Integrations (Google Sheets, etc.)
+// ---------------------------------------------------------------------------
+
+enum IntegrationType {
+  GOOGLE_SHEETS
+}
+
+model Integration {
+  id         String          @id @default(cuid())
+  type       IntegrationType
+  name       String
+  // Sheet id, tab name, column mapping, etc. Never store raw OAuth secrets
+  // here; reference a SendingAccount / encrypted credential instead.
+  config     String          @default("{}")
+  isActive   Boolean         @default(true)
+  lastSyncAt DateTime?
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Background job tracking (idempotency / observability)
+// ---------------------------------------------------------------------------
+
+enum JobStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+model JobExecution {
+  id             String    @id @default(cuid())
+  jobName        String
+  status         JobStatus
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+  itemsProcessed Int       @default(0)
+  errorMessage   String?
+  metadata       String?
+  createdAt      DateTime  @default(now())
+
+  @@index([jobName, startedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  action     String
+  entityType String?
+  entityId   String?
+  leadId     String?
+  campaignId String?
+  metadata   String?
+  createdAt  DateTime @default(now())
+
+  lead     Lead?     @relation(fields: [leadId], references: [id])
+  campaign Campaign? @relation(fields: [campaignId], references: [id])
+
+  @@index([action])
+  @@index([createdAt])
+}
