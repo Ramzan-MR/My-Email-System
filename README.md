@@ -92,15 +92,22 @@ npm run db:seed        # upsert the ADMIN_EMAIL/ADMIN_PASSWORD_HASH user into th
 1. Import the repo into Vercel, project name `My-Email-System`.
 2. Set every environment variable above in the Vercel project settings (Production +
    Preview). Never commit real values to `.env.example`.
-3. Provision a Postgres database and set `DATABASE_URL`, then run `npm run db:push` (or set
-   up `db:migrate` in CI) against it once.
+3. Provision a Postgres database and connect it so `DATABASE_URL` is set on the project
+   (easiest: Vercel dashboard → Storage → Create Database → Postgres/Neon, which injects it
+   automatically). Marketplace-provisioned secrets like this aren't readable back out through
+   the Vercel API even by the project owner — by design — so schema sync can't run from a
+   local machine against them.
 4. `vercel.json` declares the four cron jobs (`sync-inbox`, `detect-replies`,
    `find-due-followups`, `send-campaigns`), staggered once daily (06:00–06:45 UTC) because
    Vercel Hobby plans reject any cron schedule that fires more than once a day. On a Pro plan
    you can tighten these back down (e.g. every 15 minutes) for much faster reply detection and
    follow-up delivery.
-5. Deploy. `npm run build` runs `prisma generate` automatically via the `build`/`postinstall`
-   scripts, so no extra Vercel build command is needed.
+5. Deploy. Vercel runs the `vercel-build` script (`prisma generate && prisma db push && next
+   build`) instead of the plain `build` script, so the schema is pushed to whatever
+   `DATABASE_URL` the deploy resolves to on every build — safe to leave in place since `prisma
+   db push` is a no-op when the schema hasn't changed, and it refuses (rather than silently
+   applying) anything destructive without `--accept-data-loss`. For local dev, `npm run build`
+   stays schema-agnostic; use `npm run db:push` against your own local `DATABASE_URL` instead.
 
 ## Architecture notes
 
